@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Check out PocketMine-MP
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: PocketMine-MP
 
@@ -82,14 +82,14 @@ jobs:
           sha256sum build-output/PocketMine-MP.phar             > build-output/PocketMine-MP.phar.sha256
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PocketMine-MP
           path: PocketMine-MP/build-output/*
           if-no-files-found: error
 
       - name: Publish development release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: development
           name: Development Build
