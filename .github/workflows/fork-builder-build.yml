@@ -105,13 +105,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_CHECKSUM="$(
-            curl --fail --silent --show-error               https://composer.github.io/installer.sig |
-            tr -d '
-'
-          )"
+          EXPECTED_CHECKSUM="$(curl --fail --silent --show-error https://composer.github.io/installer.sig | tr -d '[:space:]')"
 
-          curl --fail --silent --show-error             https://getcomposer.org/installer             -o composer-setup.php
+          curl --fail --silent --show-error https://getcomposer.org/installer -o composer-setup.php
 
           ACTUAL_CHECKSUM="$(
             sha384sum composer-setup.php |
