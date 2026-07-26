@@ -105,9 +105,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_CHECKSUM="$(curl --fail --silent --show-error https://composer.github.io/installer.sig)"
-          curl --fail --silent --show-error https://getcomposer.org/installer -o composer-setup.php
-          ACTUAL_CHECKSUM="$("$PHP_BIN" -r "echo hash_file('sha384', 'composer-setup.php');")"
+          EXPECTED_CHECKSUM="$(
+            curl --fail --silent --show-error               https://composer.github.io/installer.sig |
+            tr -d '
+'
+          )"
+
+          curl --fail --silent --show-error             https://getcomposer.org/installer             -o composer-setup.php
+
+          ACTUAL_CHECKSUM="$(
+            sha384sum composer-setup.php |
+            awk '{print $1}'
+          )"
+
+          echo "Expected Composer installer checksum: $EXPECTED_CHECKSUM"
+          echo "Actual Composer installer checksum:   $ACTUAL_CHECKSUM"
+
+          if [ -z "$EXPECTED_CHECKSUM" ] || [ -z "$ACTUAL_CHECKSUM" ]; then
+            echo "::error::Composer installer checksum could not be calculated."
+            rm -f composer-setup.php
+            exit 1
+          fi
 
           if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
             echo "::error::Composer installer checksum verification failed."
