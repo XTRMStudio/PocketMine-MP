@@ -1,6 +1,9 @@
 name: Build PocketMine PHAR
 
 on:
+  repository_dispatch:
+    types:
+      - build-pocketmine
   workflow_dispatch:
 
 permissions:
