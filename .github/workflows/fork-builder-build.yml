@@ -1,0 +1,98 @@
+name: Build PocketMine PHAR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out PocketMine-MP
+        uses: actions/checkout@v4
+        with:
+          path: PocketMine-MP
+
+      - name: Confirm source import completed
+        working-directory: PocketMine-MP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f composer.json || {
+            echo "::error::PocketMine source has not been imported yet. Run the Import PMMP source workflow first."
+            exit 1
+          }
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          tools: composer:v2
+          coverage: none
+          extensions: curl, mbstring, openssl, phar, sodium, yaml, zip
+
+      - name: Prefer continuation dependency repositories
+        working-directory: PocketMine-MP
+        shell: bash
+        run: |
+          set -euo pipefail
+          composer config repositories.bedrock-protocol vcs "https://github.com/XTRMStudio/BedrockProtocol"
+          composer config repositories.bedrock-data vcs "https://github.com/XTRMStudio/BedrockData"
+          composer config repositories.block-schema vcs "https://github.com/XTRMStudio/BedrockBlockUpgradeSchema"
+          composer config repositories.item-schema vcs "https://github.com/XTRMStudio/BedrockItemUpgradeSchema"
+          composer config repositories.raklib vcs "https://github.com/XTRMStudio/RakLib"
+
+      - name: Install dependencies
+        working-directory: PocketMine-MP
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Run available checks
+        working-directory: PocketMine-MP
+        shell: bash
+        run: |
+          set -euo pipefail
+          composer validate --no-check-publish
+          if composer run --list | grep -q "analyze"; then composer run analyze; fi
+          if composer run --list | grep -q "test"; then composer run test; fi
+
+      - name: Build PHAR
+        working-directory: PocketMine-MP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-output
+
+          if [ -f build/server-phar.php ]; then
+            php -dphar.readonly=0 build/server-phar.php --out build-output/PocketMine-MP.phar
+          elif [ -f build/build-phar.php ]; then
+            php -dphar.readonly=0 build/build-phar.php --out build-output/PocketMine-MP.phar
+          elif composer run --list | grep -q "build"; then
+            composer run build
+            find . -name "*.phar" -type f               -exec cp {} build-output/PocketMine-MP.phar \; -quit
+          else
+            echo "::error::No supported PHAR build script was found."
+            exit 1
+          fi
+
+          test -s build-output/PocketMine-MP.phar
+          sha256sum build-output/PocketMine-MP.phar             > build-output/PocketMine-MP.phar.sha256
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PocketMine-MP
+          path: PocketMine-MP/build-output/*
+          if-no-files-found: error
+
+      - name: Publish development release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: development
+          name: Development Build
+          prerelease: true
+          make_latest: false
+          files: PocketMine-MP/build-output/*
