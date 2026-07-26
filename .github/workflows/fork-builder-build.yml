@@ -146,21 +146,17 @@ jobs:
           test -s build-output/PocketMine-MP.phar
           sha256sum build-output/PocketMine-MP.phar             > build-output/PocketMine-MP.phar.sha256
 
-          "$PHP_BIN" -r '
+          VERSION="$("$PHP_BIN" -r '
           $composer = json_decode(file_get_contents("composer.json"), true);
-          $version = $composer["version"] ?? "development";
-          file_put_contents(
-              "build-output/build-info.txt",
-              "Project: XTRMStudio/PocketMine-MP
-" .
-              "Version: " . $version . "
-" .
-              "Commit: " . getenv("GITHUB_SHA") . "
-" .
-              "Built: " . gmdate("c") . "
-"
-          );
-          '
+          echo $composer["version"] ?? "development";
+          ')"
+
+          {
+            echo "Project: XTRMStudio/PocketMine-MP"
+            echo "Version: $VERSION"
+            echo "Commit: $GITHUB_SHA"
+            echo "Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > build-output/build-info.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
