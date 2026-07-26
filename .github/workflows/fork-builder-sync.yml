@@ -1,0 +1,44 @@
+name: Check PMMP upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 2 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out continuation repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare upstream update pull request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+
+          git config user.name "PocketMine Fork Builder"
+          git config user.email "actions@users.noreply.github.com"
+          git remote add upstream "https://github.com/pmmp/PocketMine-MP.git" || true
+          git fetch upstream
+
+          git checkout -B automated-upstream-sync "origin/$DEFAULT_BRANCH"
+
+          if git merge --allow-unrelated-histories --no-edit "upstream/$DEFAULT_BRANCH"; then
+            git push --force-with-lease origin automated-upstream-sync
+
+            gh pr create               --base "$DEFAULT_BRANCH"               --head automated-upstream-sync               --title "Automated PMMP upstream update"               --body "Review all tests before merging this update."               || true
+          else
+            git merge --abort || true
+            echo "::warning::Automatic update conflicted and needs manual review."
+          fi
