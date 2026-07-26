@@ -32,8 +32,10 @@ jobs:
           # Never copy the upstream Git metadata into the continuation repository.
           rm -rf /tmp/pmmp-source/.git
 
-          # Keep Fork Builder workflows already installed in this repository.
+          # Keep only Fork Builder workflows. Imported Dependabot configuration and
+          # upstream workflow files cause unrelated failures in continuation repos.
           rm -rf /tmp/pmmp-source/.github/workflows
+          rm -f /tmp/pmmp-source/.github/dependabot.yml
 
           # Remove old repository contents, but preserve this repository's .git folder
           # and its installed workflow files.
