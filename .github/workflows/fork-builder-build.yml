@@ -155,7 +155,17 @@ jobs:
 
           mkdir -p build-output
 
-          "$PHP_BIN" ../composer.phar make-server --             --out build-output/PocketMine-MP.phar
+          # PocketMine's Composer script does not safely forward --out because
+          # Composer also passes it to the script's internal install command.
+          "$PHP_BIN" ../composer.phar make-server
+
+          test -s PocketMine-MP.phar || {
+            echo "::error::composer make-server completed without creating PocketMine-MP.phar."
+            find . -maxdepth 3 -type f -name "*.phar" -print
+            exit 1
+          }
+
+          mv PocketMine-MP.phar build-output/PocketMine-MP.phar
 
           test -s build-output/PocketMine-MP.phar
           sha256sum build-output/PocketMine-MP.phar             > build-output/PocketMine-MP.phar.sha256
