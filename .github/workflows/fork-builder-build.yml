@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 35
 
     steps:
@@ -27,59 +27,137 @@ jobs:
             exit 1
           }
 
-      - name: Set up PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.2"
-          tools: composer:v2
-          coverage: none
-          extensions: curl, mbstring, openssl, phar, sodium, yaml, zip
+      - name: Download PocketMine PHP binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
 
-      - name: Prefer continuation dependency repositories
+          mkdir -p php-runtime
+
+          # Find the newest official Linux x86_64 PHP binary made for PocketMine 5.
+          ASSET_URL="$(
+            curl --fail --silent --show-error               -H "Accept: application/vnd.github+json"               -H "Authorization: Bearer $GH_TOKEN"               "https://api.github.com/repos/pmmp/PHP-Binaries/releases?per_page=100" |
+            python3 -c '
+          import json, re, sys
+          releases = json.load(sys.stdin)
+          pattern = re.compile(r"^PHP-.*-Linux-x86_64-PM5[.]tar[.]gz$")
+          for release in releases:
+              if release.get("draft"):
+                  continue
+              for asset in release.get("assets", []):
+                  if pattern.match(asset.get("name", "")):
+                      print(asset["browser_download_url"])
+                      raise SystemExit(0)
+          raise SystemExit("No compatible PocketMine PHP binary asset was found.")
+          '
+          )"
+
+          echo "Downloading: $ASSET_URL"
+          curl --fail --location --show-error "$ASSET_URL" -o php-runtime.tar.gz
+          tar -xzf php-runtime.tar.gz -C php-runtime
+
+          PHP_BIN="$(find php-runtime -type f -path "*/bin/php" -perm -u+x | head -n 1)"
+          if [ -z "$PHP_BIN" ]; then
+            PHP_BIN="$(find php-runtime -type f -name php -perm -u+x | head -n 1)"
+          fi
+
+          test -n "$PHP_BIN" || {
+            echo "::error::The downloaded archive did not contain an executable PHP binary."
+            find php-runtime -maxdepth 5 -type f | sort
+            exit 1
+          }
+
+          echo "PHP_BIN=$GITHUB_WORKSPACE/$PHP_BIN" >> "$GITHUB_ENV"
+          "$PHP_BIN" -v
+
+      - name: Verify required PocketMine extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PHP_BIN" -r '
+          $required = [
+              "chunkutils2",
+              "crypto",
+              "encoding",
+              "leveldb",
+              "morton",
+              "pmmpthread"
+          ];
+          $missing = [];
+          foreach ($required as $extension) {
+              if (!extension_loaded($extension)) {
+                  $missing[] = $extension;
+              }
+          }
+          if ($missing !== []) {
+              fwrite(STDERR, "Missing PHP extensions: " . implode(", ", $missing) . PHP_EOL);
+              exit(1);
+          }
+          echo "PocketMine PHP extensions are available." . PHP_EOL;
+          '
+
+      - name: Download Composer
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_CHECKSUM="$(curl --fail --silent --show-error https://composer.github.io/installer.sig)"
+          curl --fail --silent --show-error https://getcomposer.org/installer -o composer-setup.php
+          ACTUAL_CHECKSUM="$("$PHP_BIN" -r "echo hash_file('sha384', 'composer-setup.php');")"
+
+          if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
+            echo "::error::Composer installer checksum verification failed."
+            rm -f composer-setup.php
+            exit 1
+          fi
+
+          "$PHP_BIN" composer-setup.php --quiet --filename=composer.phar
+          rm -f composer-setup.php
+          "$PHP_BIN" composer.phar --version
+
+      - name: Install locked dependencies
         working-directory: PocketMine-MP
         shell: bash
         run: |
           set -euo pipefail
-          composer config repositories.bedrock-protocol vcs "https://github.com/XTRMStudio/BedrockProtocol"
-          composer config repositories.bedrock-data vcs "https://github.com/XTRMStudio/BedrockData"
-          composer config repositories.block-schema vcs "https://github.com/XTRMStudio/BedrockBlockUpgradeSchema"
-          composer config repositories.item-schema vcs "https://github.com/XTRMStudio/BedrockItemUpgradeSchema"
-          composer config repositories.raklib vcs "https://github.com/XTRMStudio/RakLib"
+          "$PHP_BIN" ../composer.phar install             --no-interaction             --prefer-dist
 
-      - name: Install dependencies
-        working-directory: PocketMine-MP
-        run: composer install --no-interaction --prefer-dist
-
-      - name: Run available checks
+      - name: Validate project
         working-directory: PocketMine-MP
         shell: bash
         run: |
           set -euo pipefail
-          composer validate --no-check-publish
-          if composer run --list | grep -q "analyze"; then composer run analyze; fi
-          if composer run --list | grep -q "test"; then composer run test; fi
+          "$PHP_BIN" ../composer.phar validate --no-check-publish
 
       - name: Build PHAR
         working-directory: PocketMine-MP
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p build-output
 
-          if [ -f build/server-phar.php ]; then
-            php -dphar.readonly=0 build/server-phar.php --out build-output/PocketMine-MP.phar
-          elif [ -f build/build-phar.php ]; then
-            php -dphar.readonly=0 build/build-phar.php --out build-output/PocketMine-MP.phar
-          elif composer run --list | grep -q "build"; then
-            composer run build
-            find . -name "*.phar" -type f               -exec cp {} build-output/PocketMine-MP.phar \; -quit
-          else
-            echo "::error::No supported PHAR build script was found."
-            exit 1
-          fi
+          "$PHP_BIN" ../composer.phar make-server --             --out build-output/PocketMine-MP.phar
 
           test -s build-output/PocketMine-MP.phar
           sha256sum build-output/PocketMine-MP.phar             > build-output/PocketMine-MP.phar.sha256
+
+          "$PHP_BIN" -r '
+          $composer = json_decode(file_get_contents("composer.json"), true);
+          $version = $composer["version"] ?? "development";
+          file_put_contents(
+              "build-output/build-info.txt",
+              "Project: XTRMStudio/PocketMine-MP
+" .
+              "Version: " . $version . "
+" .
+              "Commit: " . getenv("GITHUB_SHA") . "
+" .
+              "Built: " . gmdate("c") . "
+"
+          );
+          '
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -87,6 +165,7 @@ jobs:
           name: PocketMine-MP
           path: PocketMine-MP/build-output/*
           if-no-files-found: error
+          retention-days: 30
 
       - name: Publish development release
         uses: softprops/action-gh-release@v2
