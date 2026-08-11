@@ -5,6 +5,15 @@ on:
     types:
       - build-pocketmine
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Build channel
+        required: true
+        type: choice
+        default: development
+        options:
+          - development
+          - production
 
 permissions:
   contents: write
@@ -12,6 +21,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    env:
+      BUILD_CHANNEL: ${{ github.event.client_payload.channel || inputs.channel || 'development' }}
     timeout-minutes: 35
 
     steps:
@@ -155,12 +166,17 @@ jobs:
 
           mkdir -p build-output
 
-          # PocketMine's Composer script does not safely forward --out because
-          # Composer also passes it to the script's internal install command.
-          "$PHP_BIN" ../composer.phar make-server
+          "$PHP_BIN" ../composer.phar install             --no-dev             --classmap-authoritative             --ignore-platform-reqs             --no-interaction             --prefer-dist
+
+          BUILD_ARGS=()
+          if [ "$BUILD_CHANNEL" = "production" ]; then
+            BUILD_ARGS+=("--build=1")
+          fi
+
+          "$PHP_BIN" -dphar.readonly=0 build/server-phar.php "${BUILD_ARGS[@]}"
 
           test -s PocketMine-MP.phar || {
-            echo "::error::composer make-server completed without creating PocketMine-MP.phar."
+            echo "::error::server-phar.php completed without creating PocketMine-MP.phar."
             find . -maxdepth 3 -type f -name "*.phar" -print
             exit 1
           }
@@ -178,6 +194,7 @@ jobs:
           {
             echo "Project: XTRMStudio/PocketMine-MP"
             echo "Version: $VERSION"
+            echo "Channel: $BUILD_CHANNEL"
             echo "Commit: $GITHUB_SHA"
             echo "Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > build-output/build-info.txt
