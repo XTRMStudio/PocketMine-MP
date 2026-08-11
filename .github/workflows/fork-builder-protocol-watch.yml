@@ -1,4 +1,4 @@
-name: Check protocol updates
+name: Check Mojang Bedrock updates
 
 on:
   workflow_dispatch:
@@ -11,32 +11,48 @@ permissions:
 
 jobs:
   watch:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Check latest BedrockProtocol release
-        uses: actions/github-script@v7
+      - name: Check official Mojang Bedrock samples
+        uses: actions/github-script@v8
         with:
           script: |
-            const latest = await github.rest.repos.getLatestRelease({
-              owner: "pmmp",
-              repo: "BedrockProtocol"
-            }).catch(() => null);
+            const releases = await github.paginate(
+              github.rest.repos.listReleases,
+              {
+                owner: "Mojang",
+                repo: "bedrock-samples",
+                per_page: 100
+              }
+            );
 
-            if (!latest) {
-              core.warning("No upstream BedrockProtocol release was available.");
+            const newestPreview = releases.find(
+              release => !release.draft && release.prerelease
+            );
+
+            const newestStable = releases.find(
+              release => !release.draft && !release.prerelease
+            );
+
+            const selected = newestPreview || newestStable;
+
+            if (!selected) {
+              core.warning("No Mojang Bedrock sample release was found.");
               return;
             }
 
-            const marker = `<!-- pmfb-protocol:${latest.data.tag_name} -->`;
+            const marker =
+              "<!-- xtrm-bedrock-sample:" +
+              selected.tag_name +
+              " -->";
 
             const issues = await github.paginate(
               github.rest.issues.listForRepo,
               {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                state: "all",
-                labels: "protocol-update"
+                state: "all"
               }
             );
 
@@ -47,15 +63,14 @@ jobs:
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `Review BedrockProtocol ${latest.data.tag_name}`,
-              labels: ["protocol-update"],
+              title: "Review Mojang Bedrock " + selected.tag_name,
               body: [
                 marker,
-                "A protocol update was detected.",
+                "A newer official Mojang Bedrock sample was detected.",
                 "",
-                "Do not publish it as stable automatically.",
-                "Review packet layouts, serializers, inventories, blocks and items, then test real player connections.",
+                "Sample: " + selected.html_url,
                 "",
-                latest.data.html_url
+                "Use the PocketMine Fork Builder Auto update latest button.",
+                "Do not change only the protocol number; packet/data changes must be implemented and tested."
               ].join("\n")
             });
