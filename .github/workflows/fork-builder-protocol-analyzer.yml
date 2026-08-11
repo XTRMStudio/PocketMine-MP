@@ -22,26 +22,26 @@ jobs:
 
     steps:
       - name: Check out PocketMine continuation
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 0
 
       - name: Check out BedrockProtocol continuation
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.repository_owner }}/BedrockProtocol
           path: continuation-BedrockProtocol
           ref: ${{ inputs.target_branch }}
 
       - name: Check out official Mojang protocol docs
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: Mojang/bedrock-protocol-docs
           path: mojang-protocol-docs
 
       - name: Check out official Mojang Bedrock samples
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: Mojang/bedrock-samples
           path: mojang-bedrock-samples
@@ -285,6 +285,15 @@ jobs:
           print(json.dumps(summary, indent=2))
           PY
 
+      - name: Verify protocol analysis output
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Analysis files:"
+          find .continuation -maxdepth 2 -type f -print
+          test -s ".continuation/protocol-analysis.json"
+          test -n "$(find .continuation -maxdepth 1 -type f -name 'protocol-analysis-*.md' -print -quit)"
+
       - name: Commit protocol analysis report
         shell: bash
         run: |
@@ -302,8 +311,9 @@ jobs:
           git push
 
       - name: Upload analysis artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bedrock-protocol-analysis-${{ inputs.target_version }}
           path: .continuation/
+          include-hidden-files: true
           if-no-files-found: error
