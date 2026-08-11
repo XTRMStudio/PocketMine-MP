@@ -14,6 +14,19 @@ on:
         options:
           - development
           - production
+      branch:
+        description: Branch to build
+        required: true
+        default: main
+      target_version:
+        description: Expected Bedrock version, blank for current/main
+        required: false
+        default: ""
+      experimental_protocol:
+        description: Patch continuation BedrockProtocol metadata for testing
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -23,13 +36,25 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       BUILD_CHANNEL: ${{ github.event.client_payload.channel || inputs.channel || 'development' }}
+      BUILD_BRANCH: ${{ github.event.client_payload.branch || inputs.branch || 'main' }}
+      TARGET_BEDROCK_VERSION: ${{ github.event.client_payload.target_version || inputs.target_version || '' }}
+      EXPERIMENTAL_PROTOCOL: ${{ github.event.client_payload.experimental_protocol || inputs.experimental_protocol || 'false' }}
     timeout-minutes: 35
 
     steps:
       - name: Check out PocketMine-MP
         uses: actions/checkout@v6
         with:
+          ref: ${{ env.BUILD_BRANCH }}
           path: PocketMine-MP
+
+      - name: Check out continuation BedrockProtocol
+        if: env.BUILD_BRANCH != 'main'
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/BedrockProtocol
+          ref: ${{ env.BUILD_BRANCH }}
+          path: continuation/BedrockProtocol
 
       - name: Confirm source import completed
         working-directory: PocketMine-MP
@@ -40,6 +65,139 @@ jobs:
             echo "::error::PocketMine source has not been imported yet. Run the Import PMMP source workflow first."
             exit 1
           }
+
+      - name: Prepare experimental Bedrock target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "$TARGET_BEDROCK_VERSION" ]; then
+            echo "No explicit Bedrock target requested."
+            exit 0
+          fi
+
+          EXPECTED="$(python3 -c 'import os; print(os.environ["TARGET_BEDROCK_VERSION"].removeprefix("1."))')"
+
+          if [ "$EXPERIMENTAL_PROTOCOL" != "true" ]; then
+            cd PocketMine-MP
+            ACTUAL="$(python3 - <<'PY'
+          import json, re
+          with open("composer.json", "r", encoding="utf-8") as f:
+              composer = json.load(f)
+          requirement = composer.get("require", {}).get("pocketmine/bedrock-protocol", "")
+          match = re.search(r"bedrock-([0-9.]+)", requirement)
+          print((match.group(1) if match else "").removeprefix("1."))
+          PY
+            )"
+
+            if [ -z "$ACTUAL" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "::error::This branch still targets Bedrock $ACTUAL, not $EXPECTED."
+              exit 1
+            fi
+
+            exit 0
+          fi
+
+          ANALYSIS_FILE="PocketMine-MP/.continuation/protocol-analysis.json"
+          test -s "$ANALYSIS_FILE" || {
+            echo "::error::Protocol analysis is missing on $BUILD_BRANCH."
+            exit 1
+          }
+
+          NETWORK_PROTOCOL="$(python3 - <<'PY'
+          import json
+          with open("PocketMine-MP/.continuation/protocol-analysis.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+          print(data.get("networkProtocol", ""))
+          PY
+          )"
+
+          if ! echo "$NETWORK_PROTOCOL" | grep -Eq '^[0-9]+$'; then
+            echo "::error::The Mojang network protocol could not be determined."
+            exit 1
+          fi
+
+          PROTOCOL_INFO="continuation/BedrockProtocol/src/ProtocolInfo.php"
+          test -s "$PROTOCOL_INFO" || {
+            echo "::error::BedrockProtocol ProtocolInfo.php is missing."
+            exit 1
+          }
+
+          DISPLAY_VERSION="v$EXPECTED"
+          NETWORK_VERSION="1.$EXPECTED"
+
+          python3 - "$PROTOCOL_INFO" "$NETWORK_PROTOCOL" "$DISPLAY_VERSION" "$NETWORK_VERSION" <<'PY'
+          import pathlib, re, sys
+
+          path = pathlib.Path(sys.argv[1])
+          protocol = sys.argv[2]
+          display = sys.argv[3]
+          network = sys.argv[4]
+
+          text = path.read_text(encoding="utf-8")
+          text, a = re.subn(
+              r"public const CURRENT_PROTOCOL = [0-9]+;",
+              f"public const CURRENT_PROTOCOL = {protocol};",
+              text,
+              count=1,
+          )
+          text, b = re.subn(
+              r"public const MINECRAFT_VERSION = '[^']+';",
+              f"public const MINECRAFT_VERSION = '{display}';",
+              text,
+              count=1,
+          )
+          text, c = re.subn(
+              r"public const MINECRAFT_VERSION_NETWORK = '[^']+';",
+              f"public const MINECRAFT_VERSION_NETWORK = '{network}';",
+              text,
+              count=1,
+          )
+
+          if not (a and b and c):
+              raise SystemExit("Unable to patch ProtocolInfo version constants")
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          echo "Experimental ProtocolInfo:"
+          grep -E 'CURRENT_PROTOCOL|MINECRAFT_VERSION' "$PROTOCOL_INFO" | head -n 3
+
+          python3 - "$EXPECTED" <<'PY'
+          import json, pathlib, sys
+
+          expected = sys.argv[1]
+          path = pathlib.Path("PocketMine-MP/composer.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          repositories = data.get("repositories", [])
+          if isinstance(repositories, dict):
+              repositories = [repositories]
+
+          repositories.insert(0, {
+              "type": "path",
+              "url": "../continuation/BedrockProtocol",
+              "options": {
+                  "symlink": False,
+                  "versions": {
+                      "pocketmine/bedrock-protocol":
+                          f"58.0.1+bedrock-1.{expected}"
+                  }
+              }
+          })
+
+          data["repositories"] = repositories
+          data.setdefault("require", {})["pocketmine/bedrock-protocol"] = (
+              f"58.0.1+bedrock-1.{expected}"
+          )
+
+          path.write_text(
+              json.dumps(data, indent=4, ensure_ascii=False),
+              encoding="utf-8",
+          )
+          PY
+
+          echo "PocketMine is configured to use the continuation BedrockProtocol package."
 
       - name: Download PocketMine PHP binary
         shell: bash
@@ -144,6 +302,14 @@ jobs:
           rm -f composer-setup.php
           "$PHP_BIN" composer.phar --version
 
+      - name: Resolve continuation BedrockProtocol
+        if: env.EXPERIMENTAL_PROTOCOL == 'true' && env.BUILD_BRANCH != 'main'
+        working-directory: PocketMine-MP
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PHP_BIN" ../composer.phar update pocketmine/bedrock-protocol             --with-dependencies             --no-interaction             --prefer-dist             --ignore-platform-reqs
+
       - name: Install locked dependencies
         working-directory: PocketMine-MP
         shell: bash
@@ -195,9 +361,23 @@ jobs:
             echo "Project: XTRMStudio/PocketMine-MP"
             echo "Version: $VERSION"
             echo "Channel: $BUILD_CHANNEL"
+            echo "Branch: $BUILD_BRANCH"
+            echo "Requested Bedrock: $TARGET_BEDROCK_VERSION"
             echo "Commit: $GITHUB_SHA"
             echo "Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > build-output/build-info.txt
+
+      - name: Mark experimental protocol build
+        if: env.EXPERIMENTAL_PROTOCOL == 'true' && env.BUILD_BRANCH != 'main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "ExperimentalProtocolBuild=true"
+            echo "TargetBedrock=$TARGET_BEDROCK_VERSION"
+            echo "Branch=$BUILD_BRANCH"
+            echo "LiveClientTestingRequired=true"
+          } >> PocketMine-MP/build-output/build-info.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
