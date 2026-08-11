@@ -103,13 +103,16 @@ jobs:
           current_section = None
 
           for line in text.splitlines():
-              if line.startswith("## "):
-                  current_section = line[3:].strip()
-                  sections[current_section] = []
-              elif current_section and line.lstrip().startswith("* "):
-                  sections[current_section].append(
-                      line.lstrip()[2:].strip()
-                  )
+              heading = re.match(r"^#{2,4}\s+(.+?)\s*$", line)
+              if heading:
+                  current_section = heading.group(1).strip()
+                  sections.setdefault(current_section, [])
+                  continue
+
+              if current_section:
+                  bullet = re.match(r"^\s*[-*+]\s+(.+?)\s*$", line)
+                  if bullet:
+                      sections[current_section].append(bullet.group(1))
 
           interesting_sections = [
               "New Packets",
@@ -119,17 +122,33 @@ jobs:
               "Types",
           ]
 
+          # Mojang changelogs are not completely consistent in formatting.
+          # Extract packet-like identifiers from both named sections and the
+          # entire changelog so formatting changes don't result in a false zero.
           packet_names = set()
-          for section in interesting_sections:
-              for item in sections.get(section, []):
-                  m = re.search(r"([A-Za-z0-9_]+Packet)", item)
-                  if m:
-                      packet_names.add(m.group(1))
+
+          for section_name, items in sections.items():
+              normalized = section_name.lower()
+              if any(key.lower() in normalized for key in interesting_sections):
+                  for item in items:
+                      packet_names.update(
+                          re.findall(r"\b([A-Za-z][A-Za-z0-9_]*Packet)\b", item)
+                      )
+
+          packet_names.update(
+              re.findall(r"\b([A-Za-z][A-Za-z0-9_]*Packet)\b", text)
+          )
 
           php_files = {
               path.stem: str(path.relative_to(protocol_repo))
               for path in protocol_repo.rglob("*.php")
           }
+
+          if not packet_names:
+              print(
+                  "::warning::No packet identifiers were extracted from the Mojang changelog. "
+                  "Treat this analysis as incomplete rather than compatible."
+              )
 
           missing = sorted(
               name for name in packet_names
@@ -273,6 +292,7 @@ jobs:
               "changelog": selected.name,
               "sampleVersion": sample_version,
               "changedPacketCount": len(packet_names),
+              "analysisComplete": len(packet_names) > 0,
               "missingPacketClasses": missing,
               "existingPacketClassesToReview": present,
           }
