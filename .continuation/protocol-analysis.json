@@ -1,0 +1,10 @@
+{
+  "targetVersion": "26.40",
+  "networkProtocol": "2169",
+  "currentProtocol": "1001",
+  "changelog": "changelog_2168_07_07_26.md",
+  "sampleVersion": "1.26.40.5",
+  "changedPacketCount": 0,
+  "missingPacketClasses": [],
+  "existingPacketClassesToReview": []
+}
