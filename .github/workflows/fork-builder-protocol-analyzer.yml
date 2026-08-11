@@ -1,0 +1,309 @@
+name: Analyze New Bedrock Protocol
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: Target Bedrock version, for example 26.40
+        required: true
+        default: "26.40"
+      target_branch:
+        description: Continuation branch to analyze
+        required: true
+        default: "bedrock-26.40"
+
+permissions:
+  contents: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out PocketMine continuation
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch }}
+          fetch-depth: 0
+
+      - name: Check out BedrockProtocol continuation
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/BedrockProtocol
+          path: continuation-BedrockProtocol
+          ref: ${{ inputs.target_branch }}
+
+      - name: Check out official Mojang protocol docs
+        uses: actions/checkout@v4
+        with:
+          repository: Mojang/bedrock-protocol-docs
+          path: mojang-protocol-docs
+
+      - name: Check out official Mojang Bedrock samples
+        uses: actions/checkout@v4
+        with:
+          repository: Mojang/bedrock-samples
+          path: mojang-bedrock-samples
+
+      - name: Analyze protocol docs against continuation
+        shell: bash
+        env:
+          TARGET_VERSION: ${{ inputs.target_version }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p .continuation
+
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+
+          target = os.environ["TARGET_VERSION"].strip()
+          root = pathlib.Path(".")
+          docs = root / "mojang-protocol-docs"
+          protocol_repo = root / "continuation-BedrockProtocol"
+
+          changelogs = sorted(
+              docs.glob("changelog_*.md"),
+              key=lambda p: p.name,
+              reverse=True,
+          )
+
+          if not changelogs:
+              raise SystemExit("No Mojang protocol changelog files were found.")
+
+          selected = changelogs[0]
+          text = selected.read_text(encoding="utf-8", errors="replace")
+
+          network_match = re.search(
+              r"Network Protocol Version\s+([0-9]+)",
+              text,
+              re.IGNORECASE,
+          )
+          network_protocol = network_match.group(1) if network_match else "unknown"
+
+          current_protocol_info = None
+          candidates = list(protocol_repo.rglob("ProtocolInfo.php"))
+          if candidates:
+              current_text = candidates[0].read_text(
+                  encoding="utf-8",
+                  errors="replace",
+              )
+              m = re.search(
+                  r"(?:CURRENT_PROTOCOL|PROTOCOL)[^0-9]{0,30}([0-9]{2,6})",
+                  current_text,
+              )
+              if m:
+                  current_protocol_info = m.group(1)
+
+          sections = {}
+          current_section = None
+
+          for line in text.splitlines():
+              if line.startswith("## "):
+                  current_section = line[3:].strip()
+                  sections[current_section] = []
+              elif current_section and line.lstrip().startswith("* "):
+                  sections[current_section].append(
+                      line.lstrip()[2:].strip()
+                  )
+
+          interesting_sections = [
+              "New Packets",
+              "Packets Converted to Cereal",
+              "Modified Packets",
+              "Modified Enums",
+              "Types",
+          ]
+
+          packet_names = set()
+          for section in interesting_sections:
+              for item in sections.get(section, []):
+                  m = re.search(r"([A-Za-z0-9_]+Packet)", item)
+                  if m:
+                      packet_names.add(m.group(1))
+
+          php_files = {
+              path.stem: str(path.relative_to(protocol_repo))
+              for path in protocol_repo.rglob("*.php")
+          }
+
+          missing = sorted(
+              name for name in packet_names
+              if name not in php_files
+          )
+
+          present = sorted(
+              name for name in packet_names
+              if name in php_files
+          )
+
+          sample_version = "unknown"
+          version_file = root / "mojang-bedrock-samples" / "version.json"
+          if version_file.exists():
+              try:
+                  version_data = json.loads(
+                      version_file.read_text(encoding="utf-8")
+                  )
+                  sample_version = (
+                      version_data.get("latest", {}).get("version")
+                      or "unknown"
+                  )
+              except Exception:
+                  pass
+
+          report = []
+          report.append(f"# Bedrock {target} protocol analysis")
+          report.append("")
+          report.append(
+              "Generated from Mojang's official bedrock-protocol-docs "
+              "and bedrock-samples repositories."
+          )
+          report.append("")
+          report.append(f"- Requested Bedrock target: **{target}**")
+          report.append(f"- Mojang changelog used: **{selected.name}**")
+          report.append(f"- Mojang network protocol: **{network_protocol}**")
+          report.append(
+              f"- Continuation ProtocolInfo detected: "
+              f"**{current_protocol_info or 'unknown'}**"
+          )
+          report.append(
+              f"- Mojang stable sample version.json latest: "
+              f"**{sample_version}**"
+          )
+          report.append("")
+
+          for section in interesting_sections:
+              report.append(f"## {section}")
+              items = sections.get(section, [])
+              if not items:
+                  report.append("- None listed in this changelog.")
+              else:
+                  for item in items:
+                      report.append(f"- {item}")
+              report.append("")
+
+          report.append("## Packet implementation comparison")
+          report.append("")
+          report.append(
+              f"Changed/new packet names found in changelog: "
+              f"**{len(packet_names)}**"
+          )
+          report.append(
+              f"Packet classes already present in continuation: "
+              f"**{len(present)}**"
+          )
+          report.append(
+              f"Packet classes missing from continuation: "
+              f"**{len(missing)}**"
+          )
+          report.append("")
+
+          if missing:
+              report.append("### Missing packet classes")
+              for name in missing:
+                  report.append(f"- [ ] {name}")
+              report.append("")
+
+          if present:
+              report.append("### Existing packet classes requiring review")
+              for name in present:
+                  report.append(
+                      f"- [ ] {name} — {php_files[name]}"
+                  )
+              report.append("")
+
+          report.append("## What can be automated safely")
+          report.append("")
+          report.append(
+              "- Compare Mojang packet/type documentation to existing PHP classes."
+          )
+          report.append(
+              "- Identify new packet classes and existing packet classes "
+              "affected by the official changelog."
+          )
+          report.append(
+              "- Track Mojang's current network protocol number."
+          )
+          report.append(
+              "- Prepare branches, reports, codegen/test workflows and "
+              "development builds."
+          )
+          report.append("")
+
+          report.append("## What still needs implementation/testing")
+          report.append("")
+          report.append(
+              "- Packet encode/decode changes shown by Mojang's documentation."
+          )
+          report.append(
+              "- Data that PMMP historically generated from BDS mods or "
+              "vanilla packet traces."
+          )
+          report.append(
+              "- BedrockData, block/item upgrade schemas, world data versions, "
+              "and PocketMine integration changes."
+          )
+          report.append(
+              "- Real client join, inventory, chunks, entities, crafting, "
+              "blocks/items and old-world upgrade tests."
+          )
+          report.append("")
+          report.append(
+              "> This report intentionally does not change ProtocolInfo.php. "
+              "Changing only the protocol number would make the server claim "
+              "compatibility without implementing the changed wire format."
+          )
+
+          output = root / ".continuation" / (
+              "protocol-analysis-" + target.replace(".", "-") + ".md"
+          )
+          output.write_text(
+              "\n".join(report) + "\n",
+              encoding="utf-8",
+          )
+
+          summary = {
+              "targetVersion": target,
+              "networkProtocol": network_protocol,
+              "currentProtocol": current_protocol_info,
+              "changelog": selected.name,
+              "sampleVersion": sample_version,
+              "changedPacketCount": len(packet_names),
+              "missingPacketClasses": missing,
+              "existingPacketClassesToReview": present,
+          }
+
+          (root / ".continuation" / "protocol-analysis.json").write_text(
+              json.dumps(summary, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Commit protocol analysis report
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "PocketMine Fork Builder"
+          git config user.email "actions@users.noreply.github.com"
+          git add .continuation
+
+          if git diff --cached --quiet; then
+            echo "No protocol analysis changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Analyze Bedrock ${{ inputs.target_version }} protocol"
+          git push
+
+      - name: Upload analysis artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bedrock-protocol-analysis-${{ inputs.target_version }}
+          path: .continuation/
+          if-no-files-found: error
