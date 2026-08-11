@@ -1,0 +1,236 @@
+name: Implement Bedrock Update
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: Target Bedrock version
+        required: true
+        default: "26.40"
+      target_branch:
+        description: Continuation branch
+        required: true
+        default: "bedrock-26.40"
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 50
+
+    steps:
+      - name: Check out PocketMine-MP
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_branch }}
+          path: PocketMine-MP
+
+      - name: Check out BedrockProtocol
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/BedrockProtocol
+          ref: ${{ inputs.target_branch }}
+          path: deps/BedrockProtocol
+
+      - name: Check out BedrockData
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/BedrockData
+          ref: ${{ inputs.target_branch }}
+          path: deps/BedrockData
+
+      - name: Check out block upgrade schemas
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/BedrockBlockUpgradeSchema
+          ref: ${{ inputs.target_branch }}
+          path: deps/BedrockBlockUpgradeSchema
+
+      - name: Check out item upgrade schemas
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/BedrockItemUpgradeSchema
+          ref: ${{ inputs.target_branch }}
+          path: deps/BedrockItemUpgradeSchema
+
+      - name: Check PMMP prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f PocketMine-MP/composer.json
+          test -f deps/BedrockProtocol/tools/update-from-bedrock-data.php
+          test -f deps/BedrockProtocol/tools/generate-create-static-methods.php
+
+          if [ ! -s deps/BedrockData/protocol_info.json ]; then
+            echo "::error::BedrockData/protocol_info.json is missing."
+            echo "::error::PMMP requires target-version protocol data before BedrockProtocol can be generated correctly."
+            exit 2
+          fi
+
+      - name: Download PocketMine PHP binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p php-runtime
+
+          ASSET_URL="$(
+            curl --fail --silent --show-error               -H "Accept: application/vnd.github+json"               -H "Authorization: Bearer $GH_TOKEN"               "https://api.github.com/repos/pmmp/PHP-Binaries/releases?per_page=100" |
+            python3 -c '
+          import json, re, sys
+          releases = json.load(sys.stdin)
+          pattern = re.compile(r"^PHP-.*-Linux-x86_64-PM5[.]tar[.]gz$")
+          for release in releases:
+              if release.get("draft"):
+                  continue
+              for asset in release.get("assets", []):
+                  if pattern.match(asset.get("name", "")):
+                      print(asset["browser_download_url"])
+                      raise SystemExit(0)
+          raise SystemExit("No compatible PocketMine PHP binary was found.")
+          '
+          )"
+
+          curl --fail --location --show-error "$ASSET_URL" -o php-runtime.tar.gz
+          tar -xzf php-runtime.tar.gz -C php-runtime
+
+          PHP_BIN="$(find php-runtime -type f -path "*/bin/php" -perm -u+x | head -n 1)"
+          test -n "$PHP_BIN"
+          echo "PHP_BIN=$GITHUB_WORKSPACE/$PHP_BIN" >> "$GITHUB_ENV"
+          "$PHP_BIN" -v
+
+      - name: Download Composer
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error https://getcomposer.org/installer -o composer-setup.php
+          "$PHP_BIN" composer-setup.php --quiet --filename=composer.phar
+          rm -f composer-setup.php
+          "$PHP_BIN" composer.phar --version
+
+      - name: Install BedrockProtocol tools
+        working-directory: deps/BedrockProtocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PHP_BIN" ../../composer.phar install --no-interaction --prefer-dist --ignore-platform-reqs
+
+      - name: Generate BedrockProtocol basics
+        working-directory: deps/BedrockProtocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PHP_BIN" tools/update-from-bedrock-data.php ../BedrockData
+          "$PHP_BIN" tools/generate-create-static-methods.php
+
+      - name: Link local Bedrock repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("PocketMine-MP/composer.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          packages = {
+              "pocketmine/bedrock-protocol": "../deps/BedrockProtocol",
+              "pocketmine/bedrock-data": "../deps/BedrockData",
+              "pocketmine/bedrock-block-upgrade-schema": "../deps/BedrockBlockUpgradeSchema",
+              "pocketmine/bedrock-item-upgrade-schema": "../deps/BedrockItemUpgradeSchema"
+          }
+
+          repositories = data.get("repositories", [])
+          if isinstance(repositories, dict):
+              repositories = [repositories]
+
+          local_repositories = []
+          for package, location in packages.items():
+              local_repositories.append({
+                  "type": "path",
+                  "url": location,
+                  "options": {"symlink": False}
+              })
+              data.setdefault("require", {})[package] = "dev-main"
+
+          data["repositories"] = local_repositories + repositories
+          path.write_text(json.dumps(data, indent=4), encoding="utf-8")
+          PY
+
+      - name: Resolve local Bedrock repositories
+        working-directory: PocketMine-MP
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PHP_BIN" ../composer.phar update             pocketmine/bedrock-protocol             pocketmine/bedrock-data             pocketmine/bedrock-block-upgrade-schema             pocketmine/bedrock-item-upgrade-schema             --with-dependencies             --no-interaction             --prefer-dist             --ignore-platform-reqs
+
+      - name: Run PocketMine codegen
+        working-directory: PocketMine-MP
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PHP_BIN" ../composer.phar update-codegen
+
+      - name: Run PHPStan
+        working-directory: PocketMine-MP
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PHP_BIN" vendor/bin/phpstan
+
+      - name: Run PHPUnit
+        working-directory: PocketMine-MP
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$PHP_BIN" vendor/bin/phpunit tests/phpunit
+
+      - name: Check world data version file
+        working-directory: PocketMine-MP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s src/data/bedrock/WorldDataVersions.php
+          echo "WorldDataVersions.php found. Values still require target-version review before production."
+
+      - name: Commit generated BedrockProtocol changes
+        working-directory: deps/BedrockProtocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "PocketMine Fork Builder"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Generate Bedrock ${{ inputs.target_version }} protocol basics"
+            git push origin "HEAD:${{ inputs.target_branch }}"
+          fi
+
+      - name: Mark implementation checks passed
+        working-directory: PocketMine-MP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .continuation
+
+          cat > .continuation/update-ready.json <<EOF
+          {
+            "targetVersion": "${{ inputs.target_version }}",
+            "branch": "${{ inputs.target_branch }}",
+            "bedrockProtocolGenerated": true,
+            "codegenPassed": true,
+            "phpstanPassed": true,
+            "phpunitPassed": true,
+            "playtestingRequired": true
+          }
+          EOF
+
+          git config user.name "PocketMine Fork Builder"
+          git config user.email "actions@users.noreply.github.com"
+          git add .continuation/update-ready.json composer.json composer.lock
+          git commit -m "Mark Bedrock ${{ inputs.target_version }} implementation checks ready" || true
+          git push origin "HEAD:${{ inputs.target_branch }}"
