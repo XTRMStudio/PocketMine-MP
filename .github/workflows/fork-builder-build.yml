@@ -367,22 +367,96 @@ jobs:
             echo "Built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > build-output/build-info.txt
 
-      - name: Mark experimental protocol build
+      - name: Verify compiled PHAR Bedrock target
         if: env.EXPERIMENTAL_PROTOCOL == 'true' && env.BUILD_BRANCH != 'main'
         shell: bash
         run: |
           set -euo pipefail
+
+          PHAR_PATH="PocketMine-MP/build-output/PocketMine-MP.phar"
+          test -s "$PHAR_PATH"
+
+          EXPECTED_VERSION="$(python3 -c 'import os; print(os.environ["TARGET_BEDROCK_VERSION"].removeprefix("1."))')"
+
+          EXPECTED_PROTOCOL="$(python3 - <<'PY'
+          import json
+          with open("PocketMine-MP/.continuation/protocol-analysis.json", "r", encoding="utf-8") as f:
+              print(json.load(f).get("networkProtocol", ""))
+          PY
+          )"
+
+          cat > verify-phar.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+
+          $pharPath = $argv[1];
+          $expectedVersion = $argv[2];
+          $expectedProtocol = $argv[3];
+
+          $phar = new Phar($pharPath);
+          $found = null;
+
+          $iterator = new RecursiveIteratorIterator($phar);
+          foreach($iterator as $file){
+              $path = $file->getPathName();
+              if(str_ends_with($path, "/ProtocolInfo.php")){
+                  $content = file_get_contents($path);
+                  if(
+                      $content !== false &&
+                      str_contains($content, "CURRENT_PROTOCOL") &&
+                      str_contains($content, "MINECRAFT_VERSION")
+                  ){
+                      $found = $content;
+                      break;
+                  }
+              }
+          }
+
+          if($found === null){
+              fwrite(STDERR, "::error::Could not find compiled ProtocolInfo.php inside PHAR." . PHP_EOL);
+              exit(2);
+          }
+
+          $protocolNeedle = "CURRENT_PROTOCOL = " . $expectedProtocol . ";";
+          $displayNeedle = "MINECRAFT_VERSION = 'v" . $expectedVersion . "';";
+          $networkNeedle = "MINECRAFT_VERSION_NETWORK = '1." . $expectedVersion . "';";
+
+          if(!str_contains($found, $protocolNeedle)){
+              fwrite(STDERR, "::error::Compiled PHAR does not contain protocol " . $expectedProtocol . "." . PHP_EOL);
+              exit(3);
+          }
+
+          if(!str_contains($found, $displayNeedle)){
+              fwrite(STDERR, "::error::Compiled PHAR does not contain Minecraft v" . $expectedVersion . "." . PHP_EOL);
+              exit(4);
+          }
+
+          if(!str_contains($found, $networkNeedle)){
+              fwrite(STDERR, "::error::Compiled PHAR network version is not 1." . $expectedVersion . "." . PHP_EOL);
+              exit(5);
+          }
+
+          echo "Verified compiled PHAR target" . PHP_EOL;
+          echo "Minecraft: v" . $expectedVersion . PHP_EOL;
+          echo "Protocol: " . $expectedProtocol . PHP_EOL;
+          PHP
+
+          "$PHP_BIN" verify-phar.php "$PHAR_PATH" "$EXPECTED_VERSION" "$EXPECTED_PROTOCOL"
+          rm -f verify-phar.php
+
           {
             echo "ExperimentalProtocolBuild=true"
-            echo "TargetBedrock=$TARGET_BEDROCK_VERSION"
+            echo "TargetBedrock=$EXPECTED_VERSION"
+            echo "NetworkProtocol=$EXPECTED_PROTOCOL"
             echo "Branch=$BUILD_BRANCH"
+            echo "CompiledPharVerified=true"
             echo "LiveClientTestingRequired=true"
           } >> PocketMine-MP/build-output/build-info.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: PocketMine-MP
+          name: PocketMine-MP-${{ env.TARGET_BEDROCK_VERSION || 'current' }}-${{ env.BUILD_BRANCH }}
           path: PocketMine-MP/build-output/*
           if-no-files-found: error
           retention-days: 30
