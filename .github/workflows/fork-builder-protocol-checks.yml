@@ -1,0 +1,54 @@
+name: Protocol Update Checks
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Protocol update branch to check
+        required: true
+        default: bedrock-update
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out requested branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Confirm PocketMine source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f composer.json
+          test -f tools/generate-bedrock-data-from-packets.php
+          test -f tools/generate-item-upgrade-schema.php
+
+      - name: Show Bedrock dependency targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          with open("composer.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+          for name in (
+              "pocketmine/bedrock-protocol",
+              "pocketmine/bedrock-data",
+              "pocketmine/bedrock-block-upgrade-schema",
+              "pocketmine/bedrock-item-upgrade-schema",
+          ):
+              print(f"{name}: {data.get('require', {}).get(name, 'missing')}")
+          PY
+
+      - name: Protocol update reminder
+        shell: bash
+        run: |
+          echo "This workflow checks repository readiness only."
+          echo "A real new Bedrock protocol update still requires packet/data implementation and playtesting."
